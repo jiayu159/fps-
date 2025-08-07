@@ -28,8 +28,10 @@ print(f"屏幕分辨率: {screen_width}x{screen_height}")
 # 目标类别 (person)
 TARGET_CLASS = 0
 
-# 鼠标状态
-aim_active = False  # 点击切换模式
+# 程序状态
+scan_enabled = False  # Alt键控制扫描开关
+aim_active = False    # 鼠标左键控制瞄准激活
+last_alt_state = False  # 记录上一次Alt键状态
 
 # 优化参数
 MAX_MOVE_DISTANCE = 2000    # 最大有效移动距离(像素)
@@ -45,18 +47,19 @@ last_move_time = 0
 MOVE_COOLDOWN = 0.19  # 冷却时间
 
 def on_click(x, y, button, pressed):
-    """鼠标点击回调函数 - 左键按住激活"""
+    """鼠标点击回调函数 - 左键按住激活瞄准"""
     global aim_active
     if button == mouse.Button.left:  # 处理左键
         aim_active = pressed  # 按下时激活，释放时关闭
-        status = "激活" if pressed else "关闭"
-        print(f"瞄准系统已{status}")
+        if scan_enabled:  # 只在功能启用时显示状态
+            status = "激活" if pressed else "关闭"
+            print(f"瞄准系统已{status}")
 
 # 启动鼠标监听器
 mouse_listener = mouse.Listener(on_click=on_click)
 mouse_listener.start()
 
-def find_game_window(window_title="游戏窗口"):  #窗口标题可以根据实际游戏修改
+def find_game_window(window_title="三角洲行动"):
     """查找并激活游戏窗口"""
     def callback(hwnd, windows):
         if win32gui.IsWindowVisible(hwnd):
@@ -85,7 +88,7 @@ def find_game_window(window_title="游戏窗口"):  #窗口标题可以根据实
         return 0, 0, screen_width, screen_height
 
 def detect_humans(frame, region, model):
-    """检测人体并返回上半身中心点"""
+    """使用YOLO检测人体并计算上半身中心点"""
     x, y, width, height = region
     
     # 多尺度检测 - 创建不同尺度的图像
@@ -148,7 +151,7 @@ def select_target(detections):
     if not detections:
         return None
     
-    # 过滤低置信度的检测结果
+    # 只考虑高置信度的目标
     detections = [d for d in detections if d['conf'] > MIN_CONFIDENCE]
     
     # 选择最中心的目标
@@ -197,13 +200,13 @@ def adjust_sensitivity():
     if keyboard.is_pressed("up"):
         SENSITIVITY = min(1.0, SENSITIVITY + 0.05)
         print(f"灵敏度增加至: {SENSITIVITY:.2f}")
-        time.sleep(0.2)  
+        time.sleep(0.2)  # 防止快速连续调整
     
     # 减少灵敏度
     elif keyboard.is_pressed("down"):
         SENSITIVITY = max(0.1, SENSITIVITY - 0.05)
         print(f"灵敏度减少至: {SENSITIVITY:.2f}")
-        time.sleep(0.2)  
+        time.sleep(0.2)  # 防止快速连续调整
 
 def can_move_now():
     """检查是否可以进行移动操作"""
@@ -225,9 +228,9 @@ def is_already_aimed(target_pos):
     return distance <= CENTER_THRESHOLD
 
 def main():
-    global aim_active, SENSITIVITY, last_move_time  
+    global scan_enabled, aim_active, last_alt_state, SENSITIVITY, last_move_time
     
-    print("程序启动，点击鼠标右键切换瞄准状态，按Alt+C组合键停止")
+    print("程序启动，按Alt键切换功能开关，按住鼠标左键瞄准，按Alt+C组合键停止")
     print(f"当前灵敏度: {SENSITIVITY:.2f} (使用↑/↓键调整)")
     print(f"中心阈值: {CENTER_THRESHOLD}px (小于此值认为已瞄准)")
     print(f"瞄准部位: 胸部以上 (上半身比例: {UPPER_BODY_RATIO*100}%)")
@@ -246,18 +249,25 @@ def main():
     last_fps_update = time.time()
     
     # 瞄准状态跟踪
-    aimed_count = 0  
+    aimed_count = 0  # 连续瞄准计数
     
     print("3秒后准备就绪...")
     time.sleep(3)
     
     try:
         while True:
+            # 检测Alt键按下事件（切换功能开关）
+            current_alt_pressed = keyboard.is_pressed('alt')
+            if current_alt_pressed and not last_alt_state:
+                scan_enabled = not scan_enabled
+                print(f"扫描功能已{'启用' if scan_enabled else '禁用'}")
+            last_alt_state = current_alt_pressed
+            
             # 检查灵敏度调整
             adjust_sensitivity()
             
             # 检查激活状态
-            if aim_active:
+            if scan_enabled and aim_active:
                 # 截取游戏区域
                 screenshot = pyautogui.screenshot(region=(game_x, game_y, game_width, game_height))
                 frame = np.array(screenshot)
@@ -315,9 +325,6 @@ def main():
                             try:
                                 # 一次性移动到目标位置（带平滑过渡）
                                 pydirectinput.moveTo(int(target_x), int(target_y), duration=0.05)
-                                # pydirectinput.mouseDown(button='left')
-                                # time.sleep(0.1) 
-                                # pydirectinput.mouseUp(button='left')
                                 # 更新最后移动时间
                                 last_move_time = time.time()
                                 
@@ -352,6 +359,17 @@ def main():
             else:
                 # 没有激活时等待
                 time.sleep(0.01)
+                
+                # 显示状态信息
+                if time.time() - last_fps_update >= 1.0:
+                    status = "等待激活"
+                    if scan_enabled and not aim_active:
+                        status = "扫描已启用，等待鼠标左键"
+                    elif not scan_enabled:
+                        status = "扫描已禁用，按Alt键启用"
+                    
+                    print(f"状态: {status} | 灵敏度: {SENSITIVITY:.2f}")
+                    last_fps_update = time.time()
             
             # 退出检测
             if keyboard.is_pressed('alt') and keyboard.is_pressed('c'):
