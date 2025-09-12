@@ -12,13 +12,24 @@ import torch
 from pynput import mouse 
 import random
 import math
+import sys
+
+def resource_path(relative_path):
+    """获取资源的绝对路径。用于PyInstaller打包后定位资源文件"""
+    try:
+        # PyInstaller创建的临时文件夹
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 # 检查GPU可用性
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"使用设备: {device}")
 
-# 加载YOLOv8模型 (轻量级版本)
-model = YOLO('yolov8n.pt').to(device)
+# 加载YOLOv8模型 (medium版本)
+model_path = resource_path('yolov8m.pt')  # 使用资源路径函数
+model = YOLO(model_path).to(device)       # 加载模型
 model.fuse()  
 
 # 获取屏幕尺寸
@@ -35,12 +46,17 @@ last_alt_state = False  # 记录上一次Alt键状态
 
 # 优化参数
 MAX_MOVE_DISTANCE = 2000    # 最大有效移动距离(像素)
-MIN_CONFIDENCE = 0.5        # 最低置信度阈值
-SENSITIVITY = 0.49           # 灵敏度参数 (0.1-1.0)
+MIN_CONFIDENCE = 0.6        # 最低置信度阈值
+SENSITIVITY = 0.4           # 灵敏度参数 (0.1-1.0)
 CENTER_THRESHOLD = 50      # 中心点阈值(像素)，小于此值认为已瞄准
 
 # 上半身比例 (从头部到胸部)
-UPPER_BODY_RATIO = 0.5       # 上半身占整个身体高度的比例，越小越锁头
+UPPER_BODY_RATIO = 0.3       # 上半身占整个身体高度的比例，越小越锁头
+
+# 圆形检测区域参数
+CIRCLE_CENTER_X = 1280       # 圆形区域中心X坐标
+CIRCLE_CENTER_Y = 800        # 圆形区域中心Y坐标
+CIRCLE_RADIUS = 800          # 圆形区域半径
 
 # 防止连续移动
 last_move_time = 0
@@ -59,40 +75,25 @@ def on_click(x, y, button, pressed):
 mouse_listener = mouse.Listener(on_click=on_click)
 mouse_listener.start()
 
-def find_game_window(window_title="三角洲行动"):
-    """查找并激活游戏窗口"""
-    def callback(hwnd, windows):
-        if win32gui.IsWindowVisible(hwnd):
-            title = win32gui.GetWindowText(hwnd)
-            if window_title.lower() in title.lower():
-                rect = win32gui.GetWindowRect(hwnd)
-                windows.append((hwnd, rect))
-    
-    windows = []
-    win32gui.EnumWindows(callback, windows)
-    
-    if windows:
-        hwnd, rect = windows[0]
-        x, y, right, bottom = rect
-        width = right - x
-        height = bottom - y
-        print(f"找到游戏窗口: '{win32gui.GetWindowText(hwnd)}' 位置: ({x}, {y}) 尺寸: {width}x{height}")
-        
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.5)
-        
-        return x, y, width, height
-    else:
-        print(f"未找到标题包含 '{window_title}' 的窗口")
-        return 0, 0, screen_width, screen_height
+def is_in_circle(x, y, center_x, center_y, radius):
+    """检查点(x,y)是否在以(center_x, center_y)为圆心、radius为半径的圆内"""
+    distance = math.sqrt((x - center_x)**2 + (y - center_y)**2)
+    return distance <= radius
+
+def get_circle_bounding_box(center_x, center_y, radius):
+    """获取圆形区域的外接矩形"""
+    x1 = max(0, center_x - radius)
+    y1 = max(0, center_y - radius)
+    x2 = min(screen_width, center_x + radius)
+    y2 = min(screen_height, center_y + radius)
+    return (x1, y1, x2 - x1, y2 - y1)
 
 def detect_humans(frame, region, model):
     """使用YOLO检测人体并计算上半身中心点"""
     x, y, width, height = region
     
     # 多尺度检测 - 创建不同尺度的图像
-    scales = [0.8, 0.5, 0.3]  # 原始尺寸和缩小尺寸
+    scales = [1.0, 0.5]  # 原始尺寸和缩小尺寸
     all_results = []
     
     for scale in scales:
@@ -112,7 +113,7 @@ def detect_humans(frame, region, model):
             clss = result.boxes.cls.cpu().numpy()
             
             for box, conf, cls in zip(boxes, confs, clss):
-                if conf > MIN_CONFIDENCE:  # 使用提高后的置信度阈值
+                if conf > MIN_CONFIDENCE:
                     # 调整框坐标到原始尺寸
                     if scale != 1.0:
                         box = box / scale
@@ -120,10 +121,14 @@ def detect_humans(frame, region, model):
                     # 转换为整数坐标
                     x1, y1, x2, y2 = map(int, box)
                     
+                    # 确保坐标在图像范围内
+                    x1 = max(0, min(x1, frame.shape[1]-1))
+                    y1 = max(0, min(y1, frame.shape[0]-1))
+                    x2 = max(0, min(x2, frame.shape[1]-1))
+                    y2 = max(0, min(y2, frame.shape[0]-1))
+                    
                     # 计算上半身中心点（胸部位置）
-                    # 上半身高度 = 整个身体高度 * UPPER_BODY_RATIO
                     upper_height = (y2 - y1) * UPPER_BODY_RATIO
-                    # 上半身中心Y坐标 = 头部Y坐标 + 上半身高度的一半
                     upper_y = y1 + upper_height / 2
                     cx = (x1 + x2) // 2
                     cy = int(upper_y)
@@ -136,13 +141,15 @@ def detect_humans(frame, region, model):
                     screen_x = max(0, min(screen_x, screen_width - 1))
                     screen_y = max(0, min(screen_y, screen_height - 1))
                     
-                    # 保存结果
-                    all_results.append({
-                        'bbox': (x1, y1, x2, y2),
-                        'center': (cx, cy),
-                        'screen_pos': (screen_x, screen_y),
-                        'conf': conf
-                    })
+                    # 检查是否在圆形区域内
+                    if is_in_circle(screen_x, screen_y, CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS):
+                        # 保存结果
+                        all_results.append({
+                            'bbox': (x1, y1, x2, y2),
+                            'center': (cx, cy),
+                            'screen_pos': (screen_x, screen_y),
+                            'conf': conf
+                        })
     
     return all_results
 
@@ -172,7 +179,6 @@ def select_target(detections):
             best_target = det
     
     return best_target
-
 
 def apply_sensitivity_adjustment(dx, dy):
     """应用灵敏度调整到移动向量"""
@@ -234,14 +240,14 @@ def main():
     print(f"当前灵敏度: {SENSITIVITY:.2f} (使用↑/↓键调整)")
     print(f"中心阈值: {CENTER_THRESHOLD}px (小于此值认为已瞄准)")
     print(f"瞄准部位: 胸部以上 (上半身比例: {UPPER_BODY_RATIO*100}%)")
-    
+    print(f"检测区域: 以({CIRCLE_CENTER_X},{CIRCLE_CENTER_Y})为中心, 半径{CIRCLE_RADIUS}px的圆形区域")
     # 设置输入参数
     pydirectinput.PAUSE = 0.01
     pydirectinput.FAILSAFE = False
     
-    # 查找并激活游戏窗口
-    game_region = find_game_window()
-    game_x, game_y, game_width, game_height = game_region
+    # 获取圆形区域的外接矩形
+    game_x, game_y, game_width, game_height = get_circle_bounding_box(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS)
+    print(f"检测区域外接矩形: x={game_x}, y={game_y}, width={game_width}, height={game_height}")
     
     # 帧率统计
     frame_count = 0
@@ -264,17 +270,23 @@ def main():
             last_alt_state = current_alt_pressed
             
             # 检查灵敏度调整
-            adjust_sensitivity()
+            if keyboard.is_pressed("up") or keyboard.is_pressed("down"):
+                adjust_sensitivity()
             
             # 检查激活状态
             if scan_enabled and aim_active:
-                # 截取游戏区域
-                screenshot = pyautogui.screenshot(region=(game_x, game_y, game_width, game_height))
-                frame = np.array(screenshot)
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                # 截取游戏区域（圆形区域的外接矩形）
+                try:
+                    screenshot = pyautogui.screenshot(region=(game_x, game_y, game_width, game_height))
+                    frame = np.array(screenshot)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    print(f"截图失败: {e}")
+                    time.sleep(0.1)
+                    continue
                 
                 # 检测人体
-                detections = detect_humans(frame, game_region, model)
+                detections = detect_humans(frame, (game_x, game_y, game_width, game_height), model)
                 
                 # 选择目标
                 selected_target = select_target(detections)
@@ -376,11 +388,14 @@ def main():
                 print("\n检测到停止快捷键")
                 break
                 
+    except KeyboardInterrupt:
+        print("\n用户中断程序")
     except Exception as e:
         print(f"\n发生错误: {str(e)}")
     finally:
         # 确保停止鼠标监听器
-        mouse_listener.stop()
+        if mouse_listener.is_alive():
+            mouse_listener.stop()
         print("\n程序已停止")
 
 if __name__ == "__main__":
