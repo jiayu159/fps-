@@ -16,6 +16,9 @@ import sys
 import threading
 from collections import deque
 import dxcam
+import atexit
+import warnings
+
 DXCAM_AVAILABLE = True
 
 def resource_path(relative_path):
@@ -388,6 +391,65 @@ def is_already_aimed(target_pos):
     # 如果距离小于阈值，则认为已经瞄准
     return distance <= CENTER_THRESHOLD
 
+def cleanup_resources():
+    """清理所有资源"""
+    global mouse_listener, dxcam_capture, model
+    
+    print("\n" + "="*50)
+    print("正在清理资源...")
+    
+    # 忽略资源释放时的警告
+    warnings.filterwarnings("ignore", category=ResourceWarning)
+    
+    # 1. 停止鼠标监听器
+    if 'mouse_listener' in globals() and mouse_listener is not None:
+        try:
+            if mouse_listener.is_alive():
+                mouse_listener.stop()
+                mouse_listener = None
+                print("✓ 鼠标监听器已停止")
+        except Exception as e:
+            print(f"✗ 停止鼠标监听器时出错: {e}")
+    
+    # 2. 停止DXCam截图器
+    if 'dxcam_capture' in globals() and dxcam_capture is not None:
+        try:
+            dxcam_capture.stop()
+            dxcam_capture = None
+            print("✓ DXCam截图器已停止")
+        except Exception as e:
+            print(f"✗ 停止DXCam截图器时出错: {e}")
+    
+    # 3. 清理模型资源
+    if 'model' in globals() and model is not None:
+        try:
+            # 清除GPU缓存
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            model = None
+            print("✓ 模型资源已清理")
+        except Exception as e:
+            print(f"✗ 清理模型资源时出错: {e}")
+    
+    # 4. 清理COM对象（如果有）
+    try:
+        import comtypes
+        comtypes.CoUninitialize()
+        print("✓ COM对象已清理")
+    except:
+        pass
+    
+    # 5. 等待一小段时间让资源释放
+    time.sleep(0.1)
+    print("资源清理完成")
+    print("="*50 + "\n")
+
+def exit_handler():
+    """程序退出时的清理函数"""
+    print("程序退出，执行清理...")
+    cleanup_resources()
+
 def main():
     global scan_enabled, aim_active, last_alt_state, SENSITIVITY, last_move_time
     
@@ -475,7 +537,7 @@ def main():
                         # 检查目标是否已经在中心附近
                         if is_already_aimed(selected_target['screen_pos']):
                             aimed_count += 1
-                            
+                            time.sleep(0.05)  
                             # 每秒更新一次状态
                             if current_time - last_fps_update >= 1.0:
                                 # 获取截图FPS
@@ -620,15 +682,13 @@ def main():
     except Exception as e:
         print(f"\n发生错误: {str(e)}")
     finally:
-        # 确保停止鼠标监听器
-        if mouse_listener.is_alive():
-            mouse_listener.stop()
-        
-        # 停止DXCam截图器
-        if dxcam_capture:
-            dxcam_capture.stop()
-        
-        print("\n程序已停止")
+         cleanup_resources()
+    
+    # 确保线程结束
+    time.sleep(0.2)
+    
+    print("程序已停止")
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
