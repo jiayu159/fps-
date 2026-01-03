@@ -13,6 +13,10 @@ from pynput import mouse
 import random
 import math
 import sys
+import threading
+from collections import deque
+import dxcam
+DXCAM_AVAILABLE = True
 
 def resource_path(relative_path):
     """获取资源的绝对路径。用于PyInstaller打包后定位资源文件"""
@@ -27,7 +31,7 @@ def resource_path(relative_path):
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"使用设备: {device}")
 
-# 加载YOLOv8模型 (medium版本)
+# 加载YOLOv8模型 
 model_path = resource_path('yolov8m.pt')  # 使用资源路径函数
 model = YOLO(model_path).to(device)       # 加载模型
 model.fuse()  
@@ -46,8 +50,8 @@ last_alt_state = False  # 记录上一次Alt键状态
 
 # 优化参数
 MAX_MOVE_DISTANCE = 2000    # 最大有效移动距离(像素)
-MIN_CONFIDENCE = 0.6        # 最低置信度阈值
-SENSITIVITY = 0.4           # 灵敏度参数 (0.1-1.0)
+MIN_CONFIDENCE = 0.7        # 最低置信度阈值
+SENSITIVITY = 0.30           # 灵敏度参数 (0.1-1.0)
 CENTER_THRESHOLD = 50      # 中心点阈值(像素)，小于此值认为已瞄准
 
 # 上半身比例 (从头部到胸部)
@@ -56,11 +60,162 @@ UPPER_BODY_RATIO = 0.3       # 上半身占整个身体高度的比例，越小�
 # 圆形检测区域参数
 CIRCLE_CENTER_X = 1280       # 圆形区域中心X坐标
 CIRCLE_CENTER_Y = 800        # 圆形区域中心Y坐标
-CIRCLE_RADIUS = 800          # 圆形区域半径
+CIRCLE_RADIUS = 600          # 圆形区域半径
 
 # 防止连续移动
 last_move_time = 0
-MOVE_COOLDOWN = 0.19  # 冷却时间
+MOVE_COOLDOWN = 0.20  # 冷却时间
+
+# 性能优化参数
+PROCESSING_INTERVAL = 0.02  # 处理间隔(秒)，控制处理频率
+
+class DXCamCapture:
+    """
+    高性能截图类，使用DXCam进行游戏截图
+    """
+    def __init__(self, region, target_fps=60):
+        """
+        初始化DXCam截图器
+        
+        参数：
+        region: (left, top, width, height) 截图区域
+        target_fps: 目标截图帧率
+        """
+        self.region = region  # (left, top, width, height)
+        self.target_fps = target_fps
+        
+        # 转换区域格式：DXCam使用(left, top, right, bottom)
+        self.dxcam_region = (
+            region[0], 
+            region[1], 
+            region[0] + region[2], 
+            region[1] + region[3]
+        )
+        
+        # 初始化变量
+        self.camera = None
+        self.is_running = False
+        self.frame_buffer = deque(maxlen=3)  # 保存最近3帧
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        self.capture_thread = None
+        
+        # 统计信息
+        self.fps = 0
+        self.frame_count = 0
+        self.start_time = 0
+        
+    def start(self):
+        """启动截图线程"""
+        if not DXCAM_AVAILABLE:
+            print("DXCam不可用，使用备用截图方法")
+            return False
+            
+        try:
+            # 创建DXCam实例
+            self.camera = dxcam.create()
+            if self.camera is None:
+                print("无法创建DXCam实例")
+                return False
+                
+            # 启动摄像头
+            self.camera.start(target_fps=self.target_fps, region=self.dxcam_region)
+            
+            # 启动截图线程
+            self.is_running = True
+            self.start_time = time.time()
+            self.frame_count = 0
+            
+            self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self.capture_thread.start()
+            
+            print(f"DXCam截图器已启动 - 区域: {self.region} - 目标FPS: {self.target_fps}")
+            return True
+            
+        except Exception as e:
+            print(f"启动DXCam失败: {e}")
+            return False
+    
+    def _capture_loop(self):
+        """截图线程主循环"""
+        while self.is_running:
+            try:
+                # 获取最新帧（非阻塞）
+                frame = self.camera.get_latest_frame()
+                
+                if frame is not None:
+                    with self.frame_lock:
+                        self.latest_frame = frame
+                        self.frame_buffer.append({
+                            'frame': frame.copy(),  # 深拷贝
+                            'timestamp': time.time()
+                        })
+                        self.frame_count += 1
+                    
+                    # 计算FPS
+                    elapsed = time.time() - self.start_time
+                    if elapsed > 0:
+                        self.fps = self.frame_count / elapsed
+                
+                # 微小睡眠避免CPU占用过高
+                time.sleep(0.001)
+                
+            except Exception as e:
+                print(f"截图错误: {e}")
+                time.sleep(0.01)
+    
+    def get_frame(self, wait_for_new=True, timeout=0.1):
+        """
+        获取最新帧
+        
+        参数：
+        wait_for_new: 是否等待新帧
+        timeout: 等待超时时间（秒）
+        """
+        if not self.is_running or self.latest_frame is None:
+            return None
+            
+        if wait_for_new:
+            # 记录当前缓冲区大小
+            start_size = len(self.frame_buffer)
+            start_time = time.time()
+            
+            # 等待新帧
+            while len(self.frame_buffer) <= start_size:
+                if time.time() - start_time > timeout:
+                    break
+                time.sleep(0.001)
+        
+        with self.frame_lock:
+            if self.latest_frame is not None:
+                # DXCam返回BGRA格式，转换为BGR
+                frame_bgr = cv2.cvtColor(self.latest_frame.copy(), cv2.COLOR_BGRA2BGR)
+                return frame_bgr
+        return None
+    
+    def get_fps(self):
+        """获取当前截图FPS"""
+        return self.fps
+    
+    def stop(self):
+        """停止截图器"""
+        self.is_running = False
+        
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=1.0)
+            
+        if self.camera:
+            try:
+                self.camera.stop()
+            except:
+                pass
+        
+        if self.frame_count > 0:
+            print(f"DXCam已停止 - 平均FPS: {self.fps:.1f}")
+    
+    def __del__(self):
+        """析构函数"""
+        self.stop()
 
 def on_click(x, y, button, pressed):
     """鼠标点击回调函数 - 左键按住激活瞄准"""
@@ -241,6 +396,7 @@ def main():
     print(f"中心阈值: {CENTER_THRESHOLD}px (小于此值认为已瞄准)")
     print(f"瞄准部位: 胸部以上 (上半身比例: {UPPER_BODY_RATIO*100}%)")
     print(f"检测区域: 以({CIRCLE_CENTER_X},{CIRCLE_CENTER_Y})为中心, 半径{CIRCLE_RADIUS}px的圆形区域")
+    
     # 设置输入参数
     pydirectinput.PAUSE = 0.01
     pydirectinput.FAILSAFE = False
@@ -249,10 +405,24 @@ def main():
     game_x, game_y, game_width, game_height = get_circle_bounding_box(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS)
     print(f"检测区域外接矩形: x={game_x}, y={game_y}, width={game_width}, height={game_height}")
     
+    # 初始化DXCam截图器
+    dxcam_capture = None
+    if DXCAM_AVAILABLE:
+        dxcam_capture = DXCamCapture(
+            region=(game_x, game_y, game_width, game_height),
+            target_fps=60
+        )
+        if not dxcam_capture.start():
+            print("DXCam启动失败，将使用备用截图方法")
+            dxcam_capture = None
+    else:
+        print("DXCam不可用，将使用pyautogui截图")
+    
     # 帧率统计
     frame_count = 0
     start_time = time.time()
     last_fps_update = time.time()
+    last_process_time = 0
     
     # 瞄准状态跟踪
     aimed_count = 0  # 连续瞄准计数
@@ -262,6 +432,8 @@ def main():
     
     try:
         while True:
+            current_time = time.time()
+            
             # 检测Alt键按下事件（切换功能开关）
             current_alt_pressed = keyboard.is_pressed('alt')
             if current_alt_pressed and not last_alt_state:
@@ -274,114 +446,169 @@ def main():
                 adjust_sensitivity()
             
             # 检查激活状态
-            if scan_enabled and aim_active:
-                # 截取游戏区域（圆形区域的外接矩形）
-                try:
-                    screenshot = pyautogui.screenshot(region=(game_x, game_y, game_width, game_height))
-                    frame = np.array(screenshot)
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                except Exception as e:
-                    print(f"截图失败: {e}")
-                    time.sleep(0.1)
-                    continue
+            if scan_enabled and aim_active and (current_time - last_process_time >= PROCESSING_INTERVAL):
+                frame = None
                 
-                # 检测人体
-                detections = detect_humans(frame, (game_x, game_y, game_width, game_height), model)
+                # 使用DXCam截图（如果可用）
+                if dxcam_capture and dxcam_capture.is_running:
+                    frame = dxcam_capture.get_frame(wait_for_new=False)
+                else:
+                    # 备用方法：使用pyautogui截图
+                    try:
+                        screenshot = pyautogui.screenshot(region=(game_x, game_y, game_width, game_height))
+                        frame = np.array(screenshot)
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    except Exception as e:
+                        print(f"截图失败: {e}")
+                        time.sleep(0.1)
+                        continue
                 
-                # 选择目标
-                selected_target = select_target(detections)
-                
-                # 如果找到目标
-                if selected_target:
-                    # 检查目标是否已经在中心附近
-                    if is_already_aimed(selected_target['screen_pos']):
-                        aimed_count += 1
+                if frame is not None:
+                    # 检测人体
+                    detections = detect_humans(frame, (game_x, game_y, game_width, game_height), model)
+                    
+                    # 选择目标
+                    selected_target = select_target(detections)
+                    
+                    # 如果找到目标
+                    if selected_target:
+                        # 检查目标是否已经在中心附近
+                        if is_already_aimed(selected_target['screen_pos']):
+                            aimed_count += 1
+                            
+                            # 每秒更新一次状态
+                            if current_time - last_fps_update >= 1.0:
+                                # 获取截图FPS
+                                capture_fps = dxcam_capture.get_fps() if dxcam_capture else 0
+                                
+                                # 计算处理FPS
+                                fps = frame_count / (current_time - start_time)
+                                
+                                # 显示状态
+                                status_msg = f"已瞄准 | 连续瞄准帧: {aimed_count} | 灵敏度: {SENSITIVITY:.2f}"
+                                if capture_fps > 0:
+                                    status_msg += f" | 截图FPS: {capture_fps:.1f}"
+                                status_msg += f" | 处理FPS: {fps:.1f}"
+                                print(status_msg)
+                                
+                                # 重置计数
+                                frame_count = 0
+                                start_time = current_time
+                                last_fps_update = current_time
+                            
+                            # 跳过移动操作
+                            continue
+                        else:
+                            aimed_count = 0  # 重置连续瞄准计数
+                        
+                        # 检查是否可以移动
+                        if can_move_now():
+                            # 获取目标屏幕坐标
+                            target_x, target_y = selected_target['screen_pos']
+                            
+                            # 获取当前鼠标位置
+                            current_x, current_y = pyautogui.position()
+                            
+                            # 计算需要移动的距离（目标与屏幕中心的偏移）
+                            screen_center_x = screen_width // 2
+                            screen_center_y = screen_height // 2
+                            
+                            # 计算目标与屏幕中心的偏移
+                            dx = target_x - screen_center_x
+                            dy = target_y - screen_center_y
+                            
+                            # 应用灵敏度调整
+                            dx, dy = apply_sensitivity_adjustment(dx, dy)
+                            
+                            # 计算目标鼠标位置（当前鼠标位置 + 偏移）
+                            target_mouse_x = current_x + dx
+                            target_mouse_y = current_y + dy
+                            
+                            # 计算实际移动距离
+                            distance = math.sqrt(dx**2 + dy**2)
+                            
+                            # 如果距离在有效范围内
+                            if distance <= MAX_MOVE_DISTANCE:
+                                try:
+                                    # 一次性移动到目标位置（带平滑过渡）
+                                    pydirectinput.moveTo(int(target_mouse_x), int(target_mouse_y), duration=0.05)
+                                    # 更新最后移动时间
+                                    last_move_time = current_time
+                                    
+                                    # 帧计数
+                                    frame_count += 1
+                                    
+                                    # 每秒更新一次状态
+                                    if current_time - last_fps_update >= 1.0:
+                                        # 获取截图FPS
+                                        capture_fps = dxcam_capture.get_fps() if dxcam_capture else 0
+                                        
+                                        # 计算处理FPS
+                                        fps = frame_count / (current_time - start_time)
+                                        
+                                        # 显示状态
+                                        status_msg = f"目标锁定 | 距离: {distance:.1f}px | 灵敏度: {SENSITIVITY:.2f}"
+                                        if capture_fps > 0:
+                                            status_msg += f" | 截图FPS: {capture_fps:.1f}"
+                                        status_msg += f" | 处理FPS: {fps:.1f}"
+                                        print(status_msg)
+                                        
+                                        # 重置计数
+                                        frame_count = 0
+                                        start_time = current_time
+                                        last_fps_update = current_time
+                                except Exception as e:
+                                    print(f"鼠标移动错误: {str(e)}")
+                    else:
+                        # 没有找到目标时重置瞄准计数
+                        aimed_count = 0
+                        
+                        # 帧计数
+                        frame_count += 1
                         
                         # 每秒更新一次状态
-                        if time.time() - last_fps_update >= 1.0:
-                            # 计算并显示FPS
-                            fps = frame_count / (time.time() - start_time)
-                            print(f"已瞄准 | 连续瞄准帧: {aimed_count} | 灵敏度: {SENSITIVITY:.2f} | FPS: {fps:.1f}")
+                        if current_time - last_fps_update >= 1.0:
+                            # 获取截图FPS
+                            capture_fps = dxcam_capture.get_fps() if dxcam_capture else 0
+                            
+                            # 计算处理FPS
+                            fps = frame_count / (current_time - start_time)
+                            
+                            # 显示状态
+                            status_msg = f"扫描中... | 灵敏度: {SENSITIVITY:.2f}"
+                            if capture_fps > 0:
+                                status_msg += f" | 截图FPS: {capture_fps:.1f}"
+                            status_msg += f" | 处理FPS: {fps:.1f}"
+                            print(status_msg)
+                            
+                            # 重置计数
                             frame_count = 0
-                            start_time = time.time()
-                            last_fps_update = time.time()
-                        
-                        # 跳过移动操作
-                        continue
-                    else:
-                        aimed_count = 0  # 重置连续瞄准计数
+                            start_time = current_time
+                            last_fps_update = current_time
                     
-                    # 检查是否可以移动
-                    if can_move_now():
-                        # 获取目标屏幕坐标
-                        target_x, target_y = selected_target['screen_pos']
-                        
-                        # 获取当前鼠标位置
-                        current_x, current_y = pyautogui.position()
-                        
-                        # 计算需要移动的距离
-                        dx = target_x - current_x
-                        dy = target_y - current_y
-                        
-                        # 应用灵敏度调整
-                        dx, dy = apply_sensitivity_adjustment(dx, dy)
-                        
-                        # 计算实际移动距离
-                        distance = math.sqrt(dx**2 + dy**2)
-                        
-                        # 如果距离在有效范围内
-                        if distance <= MAX_MOVE_DISTANCE:
-                            # 计算目标位置
-                            target_x = current_x + dx
-                            target_y = current_y + dy
-                            try:
-                                # 一次性移动到目标位置（带平滑过渡）
-                                pydirectinput.moveTo(int(target_x), int(target_y), duration=0.05)
-                                # 更新最后移动时间
-                                last_move_time = time.time()
-                                
-                                # 帧计数
-                                frame_count += 1
-                                
-                                # 每秒更新一次状态
-                                if time.time() - last_fps_update >= 1.0:
-                                    # 计算并显示FPS
-                                    fps = frame_count / (time.time() - start_time)
-                                    print(f"目标锁定 | 距离: {distance:.1f}px | 灵敏度: {SENSITIVITY:.2f} | FPS: {fps:.1f}")
-                                    frame_count = 0
-                                    start_time = time.time()
-                                    last_fps_update = time.time()
-                            except Exception as e:
-                                print(f"鼠标移动错误: {str(e)}")
-                else:
-                    # 没有找到目标时重置瞄准计数
-                    aimed_count = 0
+                    # 更新最后处理时间
+                    last_process_time = current_time
                     
-                    # 帧计数
-                    frame_count += 1
-                    
-                    # 每秒更新一次状态
-                    if time.time() - last_fps_update >= 1.0:
-                        # 计算并显示FPS
-                        fps = frame_count / (time.time() - start_time)
-                        print(f"扫描中... | 灵敏度: {SENSITIVITY:.2f} | FPS: {fps:.1f}")
-                        frame_count = 0
-                        start_time = time.time()
-                        last_fps_update = time.time()
             else:
                 # 没有激活时等待
                 time.sleep(0.01)
                 
                 # 显示状态信息
-                if time.time() - last_fps_update >= 1.0:
+                if current_time - last_fps_update >= 1.0:
                     status = "等待激活"
                     if scan_enabled and not aim_active:
                         status = "扫描已启用，等待鼠标左键"
                     elif not scan_enabled:
                         status = "扫描已禁用，按Alt键启用"
                     
-                    print(f"状态: {status} | 灵敏度: {SENSITIVITY:.2f}")
-                    last_fps_update = time.time()
+                    # 获取截图FPS
+                    capture_fps = dxcam_capture.get_fps() if dxcam_capture else 0
+                    
+                    status_msg = f"状态: {status} | 灵敏度: {SENSITIVITY:.2f}"
+                    if capture_fps > 0:
+                        status_msg += f" | 截图FPS: {capture_fps:.1f}"
+                    print(status_msg)
+                    last_fps_update = current_time
             
             # 退出检测
             if keyboard.is_pressed('alt') and keyboard.is_pressed('c'):
@@ -396,6 +623,11 @@ def main():
         # 确保停止鼠标监听器
         if mouse_listener.is_alive():
             mouse_listener.stop()
+        
+        # 停止DXCam截图器
+        if dxcam_capture:
+            dxcam_capture.stop()
+        
         print("\n程序已停止")
 
 if __name__ == "__main__":
