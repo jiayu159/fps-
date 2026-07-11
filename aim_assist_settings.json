@@ -1,0 +1,12 @@
+{
+  "window_title": "\u4e09\u89d2\u6d32\u884c\u52a8",
+  "target_class": 0,
+  "min_confidence": 0.5,
+  "sensitivity": 0.4,
+  "upper_body_ratio": 0.25,
+  "center_threshold": 50,
+  "max_move_distance": 2000,
+  "move_cooldown": 0.19,
+  "toggle_key": "alt",
+  "exit_key": "f10"
+}
