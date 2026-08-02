@@ -1,16 +1,21 @@
 import time
 import keyboard
 from pynput import mouse
-from .config import aim_active, SENSITIVITY
+from . import config
 
 
 mouse_listener = None
+left_pressed = False
+right_pressed = False
 
 
 def on_click(x, y, button, pressed):
-    global aim_active
+    global left_pressed, right_pressed
     if button == mouse.Button.left:
-        aim_active = pressed
+        left_pressed = pressed
+    elif button == mouse.Button.right:
+        right_pressed = pressed
+    config.aim_active = left_pressed or right_pressed
 
 
 def start_mouse_listener():
@@ -29,12 +34,11 @@ def stop_mouse_listener():
 
 
 def adjust_sensitivity():
-    global SENSITIVITY
     if keyboard.is_pressed("up"):
-        SENSITIVITY = min(1.0, SENSITIVITY + 0.05)
-        print(f"灵敏度增加至: {SENSITIVITY:.2f}")
+        config.SENSITIVITY = min(1.0, config.SENSITIVITY + 0.05)
+        print(f"灵敏度增加至: {config.SENSITIVITY:.2f}")
         time.sleep(0.2)
     elif keyboard.is_pressed("down"):
-        SENSITIVITY = max(0.1, SENSITIVITY - 0.05)
-        print(f"灵敏度减少至: {SENSITIVITY:.2f}")
+        config.SENSITIVITY = max(0.1, config.SENSITIVITY - 0.05)
+        print(f"灵敏度减少至: {config.SENSITIVITY:.2f}")
         time.sleep(0.2)

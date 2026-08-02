@@ -1,6 +1,6 @@
 import math
 import time
-from .config import SENSITIVITY, MAX_MOVE_DISTANCE, screen_width, CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS, SCREEN_CENTER_X, SCREEN_CENTER_Y, CENTER_THRESHOLD, DEBUG_MODE
+from .config import SENSITIVITY, MAX_MOVE_DISTANCE, screen_width, screen_height, CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS, SCREEN_CENTER_X, SCREEN_CENTER_Y, CENTER_THRESHOLD, DEBUG_MODE
 
 MOVE_COOLDOWN = 0.016
 last_move_time = 0.0
@@ -36,6 +36,27 @@ def apply_sensitivity_adjustment(dx, dy, stabilizer=None, current_time=None, tar
         return stabilized_dx, stabilized_dy
 
     return scaled_dx, scaled_dy
+
+
+DISTANCE_SCALE_POINTS = [
+    (0, 0.18),
+    (10, 0.38),
+    (40, 0.63),
+    (100, 0.88),
+    (250, 1.00),
+]
+
+
+def get_distance_scale(distance):
+    if distance <= DISTANCE_SCALE_POINTS[0][0]:
+        return DISTANCE_SCALE_POINTS[0][1]
+    for i in range(len(DISTANCE_SCALE_POINTS) - 1):
+        d1, s1 = DISTANCE_SCALE_POINTS[i]
+        d2, s2 = DISTANCE_SCALE_POINTS[i + 1]
+        if d1 <= distance <= d2:
+            t = (distance - d1) / (d2 - d1)
+            return s1 + (s2 - s1) * t
+    return DISTANCE_SCALE_POINTS[-1][1]
 
 
 def validate_movement(dx, dy):
