@@ -229,6 +229,15 @@ def main():
                             dy *= scale
                             distance = math.hypot(dx, dy)
 
+                            target_dist = math.hypot(
+                                target_x - SCREEN_CENTER_X, target_y - SCREEN_CENTER_Y
+                            )
+                            if target_dist > 0 and distance > target_dist:
+                                ratio = target_dist / distance
+                                dx *= ratio
+                                dy *= ratio
+                                distance = target_dist
+
                             if abs(dy) > 0 and target_y < SCREEN_CENTER_Y:
                                 if DEBUG_MODE:
                                     print(f"向上移动: 目标y={target_y}, 中心y={SCREEN_CENTER_Y}, dy={dy:.1f}")
