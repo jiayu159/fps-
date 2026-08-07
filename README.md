@@ -1,6 +1,6 @@
 # GameAimAssistant (GAA)
 
-基于 YOLO11 + DXCam 的 FPS 游戏辅助瞄准工具，支持 GPU 加速（CUDA + FP16）。
+基于 YOLO11 + DXCam 的 FPS 游戏辅助瞄准工具，需要GPU 加速（CUDA），目前实测6G显存需将游戏帧率控制在100fps才能有效运作。
 
 ## 功能
 
